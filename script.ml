@@ -1,8 +1,9 @@
 (** Types that represent the chrome extensions API **)
 type ctype =
-  CType of string * (string * ctype) list (* a type exported by chrome extensions *)
-| CBool
-| CString
+  | CObject of string * (string * string) list (* a type exported by chrome extensions *)
+  | CBool
+  | CString
+  | CFn of string * string
 (* a type has a name, and fields *)
 (* fields are names and types *)
 type cmethod =
@@ -11,36 +12,45 @@ type cevent =
   CEvent of string (* name of event *)
 type cmodule =
   (* a chrome module, has the implicit chrome. prefix *)
-  CModule of string * ctype list * cmethod list * cevent list
+    CModule of
+        string       (* name of module   *)
+      * ctype list   (* declared types   *)
+      * cmethod list (* declared methods *)
+      * cevent list  (* declared events  *)
 
-
-(* types of exported chrome extension bindings *)
-(* type cexported = *)
-(*     ECModule of string (1* a chrome module, has the implicit chrome. prefix *1) *)
-(*   | ECType of string (1* a type exported by chrome extensions *1) *)
-(*   | ECMethod of string * (string * ctype) list (1* name of method, and args with names *1) *)
-(*   | ECEvent of string (1* name of event *1) *)
-
-let chrome_alarms = CModule ("alarms", [], [], [])
+let module_kw = "module"
+let struct_kw = "struct"
+let end_kw = "end"
+let method_kw = "method"
+let sig_sep_kw = ":"
+let equal_kw = "="
+let class_kw = "class"
+let class_type_kw = "class type"
+let object_kw = "object"
+let external_kw = "external"
+let type_kw = "type"
 
 let string_of_ctype ctype = match ctype with
   | CBool -> "Js.boolean"
   | CString -> "string"
-  | CType (ty, _) -> (String.uncapitalize_ascii ty)
+  | CFn(x, y) -> x ^ " -> " ^ y
+  | CObject (ty, _) -> (String.uncapitalize_ascii ty)
+
 let codegen_properties props =
-  let c (name, ctype) =
-    match ctype with
-    | CType (ty, _) -> "method " ^ name ^ " : " ^ ty
-    | CBool -> "method " ^ name ^ " : bool"
-    | CString -> "method " ^ name ^ " : string"
+  let c (name, ctype) = "method " ^ name ^ " : " ^ ctype
+    (* match ctype with *)
+    (* | CObject (ty, _) -> "method " ^ name ^ " : " ^ ty *)
+    (* | CBool -> "method " ^ name ^ " : bool" *)
+    (* | CString -> "method " ^ name ^ " : string" *)
   in
   (* don't recurse *)
   String.concat "\n" (List.map c props)
+
 let codegen_type ctype = match ctype with
-  | CBool | CString -> "" (* primitive don't need to be codegen-ed *)
-  | CType (name, properties) ->
+  | CBool | CString | CFn _ -> "" (* primitive don't need to be codegen-ed *)
+  | CObject (name, properties) ->
   let uncap_name = String.uncapitalize_ascii name in
-  let params = List.map (fun (param, ctype) -> "?" ^ param ^ ":" ^ (string_of_ctype ctype)) (properties) in
+  let params = List.map (fun (param, ctype) -> "?" ^ param ^ ":" ^ (ctype)) (properties) in
   let fn_ty = params @ ["unit"; uncap_name] in
   "class type _" ^ uncap_name
   ^ " = object\n"
@@ -49,129 +59,102 @@ let codegen_type ctype = match ctype with
   ^ "type " ^ uncap_name ^ " = _" ^ uncap_name ^ " Js.t\n"
   ^ "external mk" ^ name ^ " : " ^ (String.concat " -> " fn_ty) ^ " = \"\" [@@bs.obj]\n"
 
-let codegen_method (CMethod (method_name, params)) =
-  let codegen_param_method (param, ctype) =
-    "method " ^ param ^ " : " ^ (string_of_ctype ctype)
+(* Given a list of args and a return type, generated a function signature.
+ * All args are assumed to be optional. *)
+let gen_fn_sig args ret =
+  let collect_args (arg, ctype) = "?" ^ arg ^ ":" ^ ctype
   in
-  let codegen_param_type (param, ctype) = match ctype with
-    | CBool | CString -> string_of_ctype ctype
-    | CType (ty, props) ->
-      let p = (String.capitalize_ascii param) in
-      "class type _" ^ method_name ^ p ^ " = object\n"
-      ^ (String.concat "\n" (List.map codegen_param_method props))
-      ^ "\nend [@bs]\n"
-      ^ "type " ^ method_name ^ p ^ " = _" ^ method_name ^ p ^ " Js.t\n"
-      ^ "external " ^ "mk" ^ (String.capitalize_ascii method_name) ^ " : "
+  String.concat " -> " ((List.map collect_args args) @ ["unit"; string_of_ctype ret])
+
+(* Given a name of a function parameter and it's type, generate code if it is an object:
+ * 1. class type for the new object
+ * 2. Js.t wrapping the class type
+ * 3. function to make instance of type
+ * *)
+let codegen_param mtd name ctype = match ctype with
+| CBool | CString | CFn _ -> ""
+| CObject (ty, props) ->
+  let gen_method (param, ctype) =
+    "method " ^ param ^ " : " ^ (ctype)
   in
-  (* let codegen_param_method (param, ctype) = match ctype with *)
-  (*   | CBool -> "method " ^ param ^ " : " ^ (string_of_ctype ctype) *)
-  (*   | CType (ty, _) -> "method " ^ param ^ " : " ^ (string_of_ctype ctype) *)
+  let p = mtd ^ (String.capitalize_ascii name) in
+  "class type _" ^ p ^ " = object\n"
+  ^ (String.concat "\n" (List.map gen_method props))
+  ^ "\nend [@bs]\n"
+  ^ "type " ^ p ^ " = _" ^ p ^ " Js.t\n"
+  ^ "external " ^ "mk" ^ (String.capitalize_ascii p) ^ " : "
+  ^ (gen_fn_sig props (CObject (p, [])))
+  ^ " = \"\" [@@bs.obj]"
+
+let uncurry fn = function (a, b) -> fn a b
+
+let codegen_method module_name (CMethod (method_name, params)) =
   let collect_params (param, ctype) = match ctype with
     | CBool | CString -> string_of_ctype ctype
-    | CType _ -> method_name ^ (String.capitalize_ascii param)
+    | CFn _ -> "(" ^ string_of_ctype ctype ^ ")"
+    | CObject _ -> method_name ^ (String.capitalize_ascii param)
   in
   let method_sig = String.concat " -> " ((List.map collect_params params) @ ["unit"]) in
-  let params_type = String.concat "\n" (List.map codegen_param_type params) in
+  let params_type = String.concat "\n" (List.map (uncurry (codegen_param method_name)) params) in
   params_type ^ "\n"
-  ^ "external " ^ method_name ^ " : " ^ method_sig ^ " = \"" ^ method_name ^ "\"" ^ " [@@bs.scope \"chrome\"] [@@bs.val]\n"
+  ^ "external " ^ method_name ^ " : " ^ method_sig ^ " = \"" ^ method_name ^ "\""
+  ^ " [@@bs.scope \"chrome\", \"" ^ module_name ^ "\"] [@@bs.val]\n"
   (* for each method arg, if it's a complicated object, we generate a new type *)
-  (*
-  class type _getAuthTokenOptions = object
-    method interactive : Js.boolean
-    method scopes : string list
-    method account : accountInfo
-  end [@bs]
 
-  type getAuthTokenOptions = _getAuthTokenOptions Js.t
-  external mkAuthOptions : ?interactive:Js.boolean -> ?scopes:string list -> ?account:accountInfo -> unit -> getAuthTokenOptions = "" [@@bs.obj]
-  *)
+let space_between = String.concat " "
+let line_between = String.concat "\n"
+let with_module_struct module_name body =
+  line_between [
+    space_between [ module_kw; module_name; equal_kw; struct_kw; ]
+  ; body
+  ; end_kw
+  ]
 
-let codegen_event (anevent : cevent) =
-  ""
 (* generates code for a module *)
 let codegen_module (CModule (name, types, methods, events)) =
-  "module " ^ (String.capitalize_ascii name) ^ " = struct\n" ^
-  (String.concat "\n" (List.map codegen_type types))
-  ^
-  (String.concat "\n" (List.map codegen_method methods))
-  ^ "end"
+  let module_name = String.capitalize_ascii name in
+  let type_code = List.map codegen_type types in
+  let method_code = List.map (codegen_method name) methods in
+  with_module_struct module_name (line_between (type_code @ method_code))
 
-let carraystring = CType ("string list", [])
-let accountinfo = CType("AccountInfo", [("id", CString)])
+let accountinfo = CObject("AccountInfo", [("id", "string")])
 let _ =
-  let m = CModule("identity", [accountinfo],
-                  [CMethod("getAuthToken", [("details", CType("getAuthTokenOptions", [
-                       ("interactive", CBool);
-                       ("account", accountinfo);
-                       ("scopes", carraystring)
-                     ]))])], []) in
+  let m = CModule("identity",
+                  [accountinfo],
+                  [CMethod("getAuthToken",
+                           [("details", CObject(
+                                "getAuthTokenOptions", [
+                                  ("interactive", "Js.boolean");
+                                  ("account", "accountInfo");
+                                  ("scopes", "string list")
+                                ]));
+                            ("callback", CFn("string", "'a"
+                              ))
+                           ])], []) in
   let gen = codegen_module m in
   print_endline gen
 
 (*
-module Identity = struct
-  (* chrome.identity.getAuthToken *)
+chrome.identity
+     AccountInfo
+       id:string
+     getAuthToken
+       details:{interactive:boolean?, account:AccountInfo?, scopes:string[]?}
+       callback:token:string? -> unit
 
-  class type _accountInfo = object
-    method id : string
-  end [@bs]
+Uppercase first letter => Type
+lowercase first letter => method
 
-  type accountInfo = _accountInfo Js.t
-  external mkAccountInfo : ?id:string -> unit -> accountInfo = "" [@@bs.obj]
-
-  class type _getAuthTokenOptions = object
-    method interactive : Js.boolean
-    method scopes : string list
-    method account : accountInfo
-  end [@bs]
-
-  type getAuthTokenOptions = _getAuthTokenOptions Js.t
-  external mkAuthOptions : ?interactive:Js.boolean -> ?scopes:string list -> ?account:accountInfo -> unit -> getAuthTokenOptions = "" [@@bs.obj]
-
-  external getAuthToken : getAuthTokenOptions -> (string -> 'a) -> unit = "getAuthToken" [@@bs.scope "chrome", "identity"] [@@bs.val]
-
-  (* chrome.identity.getProfileUserInfo *)
-
-  class type _profileUserInfo = object
-    method id : string
-    method email : string
-  end [@bs]
-
-  type profileUserInfo = _profileUserInfo Js.t
-
-  external getProfileUserInfo : (profileUserInfo -> 'a) -> unit = "getProfileUserInfo" [@@bs.scope "chrome", "identity"] [@@bs.val]
-
-  (* chrome.identity.removeCachedAuthToken *)
-
-  class type _rmCachedToken = object
-    method token : string
-  end [@bs]
-
-  type rmCachedTokenOptions = _rmCachedToken Js.t
-  external mkRmCachedTokenOptions : token:string -> unit -> rmCachedTokenOptions = "" [@@bs.obj]
-
-  external removeCachedAuthToken : rmCachedTokenOptions -> (unit -> 'a) -> unit = "removeCachedAuthToken" [@@bs.scope "chrome", "identity"] [@@bs.val]
-
-  (* chrome.identity.launchWebAuthFlow *)
-
-  class type _webAuthFlowOptions = object
-    method url : string
-    method interactive : Js.boolean
-  end [@bs]
-
-  type webAuthFlowOptions = _webAuthFlowOptions Js.t
-  external mkWebFlowOptions : url:string -> ?interactive:Js.boolean -> unit -> webAuthFlowOptions = "" [@@bs.obj]
-
-  external launchWebAuthFlow : webAuthFlowOptions -> (string Js.null -> unit -> 'a) -> unit = "launchWebAuthFlow" [@@bs.scope "chrome", "identity"] [@@bs.val]
-
-  (* chrome.identity.getRedirectURL *)
-
-  external getRedirectURL : string Js.null -> string = "getRedirectURL" [@@bs.scope "chrome", "identity"] [@@bs.val]
-
-  (* chrome.identity.onSignInChanged.addListener *)
-
-  module OnSignInChanged = struct
-    external addListener : (accountInfo -> Js.boolean -> 'a) -> unit = "addListener" [@@bs.scope "chrome", "identity", "onSignInChanged"] [@@bs.val]
-  end
-end
+CModule(
+   "chrome.identity"
+ , [CType(
+      "AccountInfo",
+      [("id", "string")])
+   ]
+ , [CMethod(
+      "getAuthToken",
+      [("details", Object([("interactive", "boolean?"); ("account", "AccountInfo?"); ("scopes", "string[]?"])
+       ("callback", Fun("string?", "unit"))
+      ,])
+   ]
 *)
