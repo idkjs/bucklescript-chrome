@@ -20,6 +20,7 @@ type cmodule =
       * cmethod list (* declared methods *)
       * cevent list  (* declared events  *)
 
+(** Helper constants for building output *)
 let kw_bs_obj = "[@@bs.obj]"
 let kw_bs_val = "[@@bs.val]"
 let kw_bs = "[@bs]"
@@ -36,15 +37,9 @@ let kw_struct = "struct"
 let kw_type = "type"
 let kw_unit = "unit"
 
-(* Some helpers for pretty printing code *)
+(* Helpers for pretty printing code *)
 let space_between = String.concat " "
 let line_between = String.concat "\n"
-let with_module_struct module_name body =
-  line_between [
-    space_between [ kw_module; module_name; kw_equals; kw_struct; ]
-  ; body
-  ; kw_end
-  ]
 let quote s = "\"" ^ s ^ "\""
 
 let string_of_ctype ctype = match ctype with
@@ -104,8 +99,7 @@ let codegen_param mtd (name, ctype) = match ctype with
     ]
   ]
 
-let uncurry fn = function (a, b) -> fn a b
-
+(* for each method arg, if it's a complicated object, we generate a new type *)
 let codegen_method module_name (CMethod (method_name, params)) =
   let collect_params (param, ctype) = match ctype with
     | CBool | CString -> string_of_ctype ctype
@@ -127,55 +121,34 @@ let codegen_method module_name (CMethod (method_name, params)) =
     ; kw_bs_val
     ]
   ]
-  (* for each method arg, if it's a complicated object, we generate a new type *)
 
 (* generates code for a module *)
 let codegen_module (CModule (name, types, methods, events)) =
   let module_name = String.capitalize_ascii name in
   let type_code = List.map codegen_type types in
   let method_code = List.map (codegen_method name) methods in
-  with_module_struct
-    module_name
-    (line_between (type_code @ [""] @ method_code))
+  line_between [
+    space_between [ kw_module; module_name; kw_equals; kw_struct; ]
+  ; line_between (type_code @ [""] @ method_code)
+  ; kw_end
+  ]
 
 let accountinfo = CObject("AccountInfo", [("id", "string")])
 let _ =
-  let m = CModule("identity",
-                  [accountinfo],
-                  [CMethod("getAuthToken",
-                           [("details", CObject(
-                                "getAuthTokenOptions", [
-                                  ("interactive", "Js.boolean");
-                                  ("account", "accountInfo");
-                                  ("scopes", "string list")
-                                ]));
-                            ("callback", CFn("string", "'a"
-                              ))
-                           ])], []) in
+  let m = CModule(
+      "identity"
+    , [accountinfo]
+    , [CMethod(
+        "getAuthToken"
+      , [("details"
+         , CObject(
+             "getAuthTokenOptions", [
+               ("interactive", "Js.boolean")
+             ; ("account", "accountInfo")
+             ; ("scopes", "string list")
+             ]))
+        ; ("callback", CFn("string", "'a"))
+        ])]
+    , []) in
   let gen = codegen_module m in
   print_endline gen
-
-(*
-chrome.identity
-     AccountInfo
-       id:string
-     getAuthToken
-       details:{interactive:boolean?, account:AccountInfo?, scopes:string[]?}
-       callback:token:string? -> unit
-
-Uppercase first letter => Type
-lowercase first letter => method
-
-CModule(
-   "chrome.identity"
- , [CType(
-      "AccountInfo",
-      [("id", "string")])
-   ]
- , [CMethod(
-      "getAuthToken",
-      [("details", Object([("interactive", "boolean?"); ("account", "AccountInfo?"); ("scopes", "string[]?"])
-       ("callback", Fun("string?", "unit"))
-      ,])
-   ]
-*)
