@@ -24,3 +24,5 @@ lib/bs
 .vscode
 .merlin
 node_modules/
+yarn.lock
+.bsb.lock

@@ -2,7 +2,7 @@ open Chrome.Identity
 
 let testGetAuthToken () = getAuthToken
     (mkAuthOptions
-       ~interactive:Js.true_ ()
+       ~interactive:true ()
        ~scopes:["scope"]
        ~account:(mkAccountInfo ~id:"id" ()))
     (fun v ->
@@ -18,11 +18,11 @@ let testLaunchWebAuthFlow = launchWebAuthFlow
     (mkWebFlowOptions
        ~url:"https://example.com" ())
     (fun mResponseURL () ->
-       match (Js.Null.to_opt mResponseURL) with
+       match (Js.Null.toOption mResponseURL) with
        | Some responesUrl -> Js.log responesUrl
        | None -> Js.log "No url returned!")
 
-let testGetRedirectURL = getRedirectURL (Js.Null.from_opt (Some "path"))
+let testGetRedirectURL = getRedirectURL (Js.Null.fromOption (Some "path"))
 
 let testOnSignInChanged = OnSignInChanged.addListener (fun accountInfo signedIn ->
     Js.log signedIn |> (fun _ -> Js.log accountInfo##id))
